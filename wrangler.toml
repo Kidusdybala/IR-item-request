@@ -4,8 +4,8 @@ compatibility_date = "2025-01-01"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "item-bot-db"
-database_id = "PASTE_YOUR_D1_ID_HERE"
+database_name = "ir-item-request-db"
+database_id = "41a4bf4a-bcbf-4eae-9815-98e34335e219"
 
 [vars]
 ADMIN_IDS = "1890482340"   # comma-separated Telegram IDs
