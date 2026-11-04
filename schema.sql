@@ -1,4 +1,4 @@
--- Run once:  wrangler d1 execute item-bot-db --remote --file=schema.sql
+-- Fresh database: wrangler d1 execute ir-item-request-db --remote --file=schema.sql
 
 CREATE TABLE IF NOT EXISTS users (
   telegram_id  INTEGER PRIMARY KEY,          -- permanent identity (usernames can change)
@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS requests (
   received_at            TEXT,
   due_at                 TEXT,
   return_requested_at    TEXT,
+  return_requested_qty   INTEGER NOT NULL DEFAULT 0,
+  returned_qty           INTEGER NOT NULL DEFAULT 0,
   returned_at            TEXT,
   returned_confirmed_by  INTEGER,
   admin_note             TEXT,

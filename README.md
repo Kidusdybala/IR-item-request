@@ -14,12 +14,12 @@ wrangler login
 wrangler deploy
 ```
 
-The D1 schema is already installed. For a fresh database, run `wrangler d1 execute ir-item-request-db --remote --file=schema.sql` once. `BOT_TOKEN` and `WEBHOOK_SECRET` are Cloudflare Worker secrets and must never be committed. To rotate the bot token, replace it with `wrangler secret put BOT_TOKEN`, set a new random `WEBHOOK_SECRET` the same way, then register the webhook at `https://ir-item-request.buddykk07.workers.dev/setup?key=THE_NEW_WEBHOOK_SECRET` using the exact new value you entered.
+The D1 schema is already installed. For a fresh database, run `wrangler d1 execute ir-item-request-db --remote --file=schema.sql` once. When upgrading an existing database to support partial returns, run `wrangler d1 execute ir-item-request-db --remote --file=migrations/0002_partial_returns.sql` once. `BOT_TOKEN` and `WEBHOOK_SECRET` are Cloudflare Worker secrets and must never be committed. To rotate the bot token, replace it with `wrangler secret put BOT_TOKEN`, set a new random `WEBHOOK_SECRET` the same way, then register the webhook at `https://ir-item-request.buddykk07.workers.dev/setup?key=THE_NEW_WEBHOOK_SECRET` using the exact new value you entered.
 
 Open the bot in Telegram and send `/start`. Add inventory with `/additem Laptop Dell;5;pcs;yes;IT`.
 
 ## How it works
-- **User**: /start → sends employee ID → admin approves → taps **Request an item** → item button → quantity button → confirm. No typing.
+- **User**: /start → sends employee ID → admin approves → taps **Request an item** → item button → types quantity → confirms. To return a loan, the user types the quantity being returned and the admin confirms that amount.
 - **Admin** gets Approve / Reject buttons (reject can include a reason). Stock is reserved atomically at request time.
 - After approval the user taps **I received it** (confirmation linked to their Telegram ID). Returnable items get a due date; the user reports the return and the admin confirms.
 - Every action is saved in `requests` and `audit_log`. Nothing is deleted.

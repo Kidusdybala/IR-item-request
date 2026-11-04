@@ -119,6 +119,12 @@ async function onMessage(m, env) {
   const st = await getState(env, m.from.id);
   if (st === 'reg' && user.status === 'new') return register(ctx, user, text);
   if (!admin && user.status !== 'approved') return gate(ctx, user);
+  if (text === '/cancel') {
+    await clearState(env, m.from.id);
+    return ctx.reply('Cancelled. Choose an option from the menu.', [[MENU]]);
+  }
+  if (st?.startsWith('qty:')) return submitRequestQty(ctx, Number(st.slice(4)), text);
+  if (st?.startsWith('retqty:')) return submitReturnQty(ctx, Number(st.slice(7)), text);
   if (admin && text.startsWith('/')) return adminCommand(ctx, text);
   if (admin && st?.startsWith('rej:')) { await clearState(env, m.from.id); return finishReject(ctx, Number(st.slice(4)), text); }
   return menu(ctx, user);
@@ -168,14 +174,13 @@ async function onCallback(cq, env) {
   switch (p[0]) {
     case 'm': await clearState(env, cq.from.id); return menu(ctx, user);
     case 'ri': return showItems(ctx, Number(p[1]) || 0);
-    case 'it': return pickQty(ctx, Number(p[1]));
-    case 'q': return confirmScreen(ctx, Number(p[1]), Number(p[2]));
+    case 'it': return beginRequestQty(ctx, Number(p[1]));
     case 'ok': return createRequest(ctx, Number(p[1]), Number(p[2]));
     case 'my': return myRequests(ctx);
     case 'hold': return myHoldings(ctx);
     case 'cx': return cancelRequest(ctx, Number(p[1]));
     case 'rcv': return confirmReceipt(ctx, Number(p[1]));
-    case 'ret': return requestReturn(ctx, Number(p[1]));
+    case 'ret': return beginReturnQty(ctx, Number(p[1]));
     case 'a': return admin ? adminCb(ctx, p) : null;
   }
 }
@@ -195,15 +200,25 @@ async function showItems(ctx, page) {
   return ctx.reply('📦 <b>Available items</b>\nTap the item you need:', rows);
 }
 
-async function pickQty(ctx, itemId) {
+async function beginRequestQty(ctx, itemId) {
   const it = await ctx.env.DB.prepare('SELECT * FROM items WHERE id=? AND active=1').bind(itemId).first();
   if (!it || it.available_qty < 1) return ctx.reply('Sorry, this item is no longer available.', [[btn('⬅️ Items', 'ri:0')]]);
-  const opts = [1, 2, 3, 4, 5, 10, 20, 50].filter(n => n <= it.available_qty);
-  if (!opts.includes(it.available_qty) && it.available_qty <= 100) opts.push(it.available_qty);
-  const rows = [];
-  for (let i = 0; i < opts.length; i += 4) rows.push(opts.slice(i, i + 4).map(n => btn(String(n), `q:${itemId}:${n}`)));
-  rows.push([btn('⬅️ Back', 'ri:0')]);
-  return ctx.reply(`<b>${esc(it.name)}</b>\nAvailable: ${it.available_qty} ${esc(it.unit)}${it.returnable ? `\n🔁 Returnable (${it.loan_days} days)` : ''}\n\nHow many do you need?`, rows);
+  await setState(ctx.env, ctx.from.id, `qty:${itemId}`);
+  return ctx.reply(`<b>${esc(it.name)}</b>\nAvailable: ${it.available_qty} ${esc(it.unit)}${it.returnable ? `\n🔁 Returnable (${it.loan_days} days)` : ''}\n\nType the quantity you need as a whole number. Send /cancel to stop.`);
+}
+
+async function submitRequestQty(ctx, itemId, text) {
+  const qty = /^\d+$/.test(text) ? Number(text) : 0;
+  const it = await ctx.env.DB.prepare('SELECT * FROM items WHERE id=? AND active=1').bind(itemId).first();
+  if (!it || it.available_qty < 1) {
+    await clearState(ctx.env, ctx.from.id);
+    return ctx.reply('Sorry, this item is no longer available.', [[btn('📦 Choose another item', 'ri:0')], [MENU]]);
+  }
+  if (!Number.isSafeInteger(qty) || qty < 1 || qty > it.available_qty) {
+    return ctx.reply(`Enter a whole number from 1 to ${it.available_qty} ${esc(it.unit)}. Send /cancel to stop.`);
+  }
+  await clearState(ctx.env, ctx.from.id);
+  return confirmScreen(ctx, itemId, qty);
 }
 
 async function confirmScreen(ctx, itemId, qty) {
@@ -248,14 +263,14 @@ async function myRequests(ctx) {
 
 async function myHoldings(ctx) {
   const { results } = await ctx.env.DB.prepare(
-    `SELECT r.* FROM requests r JOIN items i ON i.id=r.item_id
+    `SELECT r.*, i.unit FROM requests r JOIN items i ON i.id=r.item_id
      WHERE r.user_id=? AND i.returnable=1 AND r.status IN ('received','return_pending') ORDER BY r.id DESC`
   ).bind(ctx.from.id).all();
   if (!results.length) return ctx.reply('🎒 You are not holding any returnable items.', [[MENU]]);
   const rows = results.filter(r => r.status === 'received').map(r => [btn(`↩️ Return #${r.id} (${r.item_name})`, `ret:${r.id}`)]);
   rows.push([MENU]);
   return ctx.reply('🎒 <b>Items you hold</b>\n\n' + results.map(r =>
-    `#${r.id} · ${esc(r.item_name)} ×${r.qty}\n   since ${fmt(r.received_at, ctx.env)} · due ${fmt(r.due_at, ctx.env)}${r.status === 'return_pending' ? ' · ↩️ awaiting admin' : ''}`).join('\n'), rows);
+    `#${r.id} · ${esc(r.item_name)} · ${r.qty - r.returned_qty} ${esc(r.unit)} outstanding\n   since ${fmt(r.received_at, ctx.env)} · due ${fmt(r.due_at, ctx.env)}${r.status === 'return_pending' ? ` · ↩️ ${r.return_requested_qty} pending admin confirmation` : ''}`).join('\n'), rows);
 }
 
 async function cancelRequest(ctx, id) {
@@ -283,15 +298,40 @@ async function confirmReceipt(ctx, id) {
     due ? [[btn('🎒 Items I hold', 'hold')], [MENU]] : [[MENU]]);
 }
 
-async function requestReturn(ctx, id) {
+async function beginReturnQty(ctx, id) {
+  const r = await getReq(ctx.env, id);
+  if (!r || r.user_id !== ctx.from.id || !r.returnable || r.status !== 'received')
+    return ctx.reply('This item is not available to return right now.', [[btn('🎒 Items I hold', 'hold')], [MENU]]);
+  const outstanding = r.qty - (r.returned_qty || 0);
+  if (outstanding < 1) return ctx.reply('This request has no outstanding items to return.', [[MENU]]);
+  await setState(ctx.env, ctx.from.id, `retqty:${id}`);
+  return ctx.reply(`How many <b>${esc(r.item_name)}</b> are you returning?\nYou have ${outstanding} ${esc(r.unit)} outstanding. Send /cancel to stop.`);
+}
+
+async function submitReturnQty(ctx, id, text) {
   const { env } = ctx;
-  const res = await env.DB.prepare("UPDATE requests SET status='return_pending', return_requested_at=? WHERE id=? AND user_id=? AND status='received'").bind(now(), id, ctx.from.id).run();
-  if (!res.meta.changes) return ctx.reply('Nothing to return for this request.', [[MENU]]);
+  const qty = /^\d+$/.test(text) ? Number(text) : 0;
   const r = await getReq(env, id);
-  await audit(env, ctx.from.id, 'return_requested', 'request', id);
-  await notifyAdmins(env, `↩️ <b>${esc(r.full_name)}</b> says they returned #${id}: ${esc(r.item_name)} ×${r.qty}. Please verify.`,
+  if (!r || r.user_id !== ctx.from.id || !r.returnable || r.status !== 'received') {
+    await clearState(env, ctx.from.id);
+    return ctx.reply('This item is not available to return right now.', [[btn('🎒 Items I hold', 'hold')], [MENU]]);
+  }
+  const outstanding = r.qty - (r.returned_qty || 0);
+  if (!Number.isSafeInteger(qty) || qty < 1 || qty > outstanding)
+    return ctx.reply(`Enter a whole number from 1 to ${outstanding} ${esc(r.unit)}. Send /cancel to stop.`);
+  const res = await env.DB.prepare(
+    "UPDATE requests SET status='return_pending', return_requested_qty=?, return_requested_at=? WHERE id=? AND user_id=? AND status='received' AND qty-returned_qty>=?"
+  ).bind(qty, now(), id, ctx.from.id, qty).run();
+  if (!res.meta.changes) {
+    await clearState(env, ctx.from.id);
+    return ctx.reply('The outstanding quantity changed. Please check your holdings and try again.', [[btn('🎒 Items I hold', 'hold')]]);
+  }
+  await clearState(env, ctx.from.id);
+  const updated = await getReq(env, id);
+  await audit(env, ctx.from.id, 'return_requested', 'request', id, `${updated.item_name} x${qty}`);
+  await notifyAdmins(env, `↩️ <b>${esc(updated.full_name)}</b> says they returned #${id}: ${esc(updated.item_name)} ×${qty} ${esc(updated.unit)}. Please verify.`,
     [[btn('✅ Confirm returned', `a:ret:${id}`)]]);
-  return ctx.reply('↩️ Return reported. Waiting for the admin to confirm.', [[MENU]]);
+  return ctx.reply(`↩️ Return of ${qty} ${esc(r.unit)} reported. Waiting for admin confirmation.`, [[MENU]]);
 }
 
 // ───────────────────────── admin callbacks ─────────────────────────
@@ -309,7 +349,8 @@ async function adminCb(ctx, p) {
       await setState(ctx.env, ctx.from.id, `rej:${id}`);
       return ctx.reply(`❌ Rejecting #${id}. Type a reason now, or skip.`, [[btn('Skip reason', `a:rjs:${id}`)]]);
     case 'rjs': await clearState(ctx.env, ctx.from.id); return finishReject(ctx, id, '');
-    case 'ret': return confirmReturn(ctx, id);
+    case 'ret': return confirmReturn(ctx, id, false);
+    case 'retall': return confirmReturn(ctx, id, true);
   }
 }
 
@@ -387,16 +428,29 @@ async function finishReject(ctx, id, reason) {
   return ctx.reply(`❌ Rejected #${id}. Stock released.`, [[btn('⏳ Pending', 'a:pend')], [MENU]]);
 }
 
-async function confirmReturn(ctx, id) {
+async function confirmReturn(ctx, id, markAll) {
   const { env } = ctx;
-  const res = await env.DB.prepare("UPDATE requests SET status='returned', returned_at=?, returned_confirmed_by=? WHERE id=? AND status IN ('received','return_pending')").bind(now(), ctx.from.id, id).run();
   const r = await getReq(env, id);
   if (!r) return ctx.reply('Request not found.', [[MENU]]);
-  if (!res.meta.changes) return ctx.reply(`#${id} is not out (${STATUS[r.status] || r.status}).`, [[btn('🔄 Currently out', 'a:out')]]);
-  await env.DB.prepare('UPDATE items SET available_qty=MIN(total_qty, available_qty+?) WHERE id=?').bind(r.qty, r.item_id).run();
-  await audit(env, ctx.from.id, 'returned', 'request', id);
-  await send(env, r.user_id, `✅ Return of #${id} (${esc(r.item_name)} ×${r.qty}) confirmed. Thank you!`);
-  return ctx.reply(`✅ #${id} marked returned. Stock restored.`, [[btn('🔄 Currently out', 'a:out')], [MENU]]);
+  const expectedStatus = markAll ? 'received' : 'return_pending';
+  const returnQty = markAll ? r.qty - r.returned_qty : r.return_requested_qty;
+  if (r.status !== expectedStatus || returnQty < 1)
+    return ctx.reply(`#${id} has no return awaiting this confirmation.`, [[btn('🔄 Currently out', 'a:out')]]);
+  const completedAt = now();
+  const res = await env.DB.prepare(
+    `UPDATE requests SET returned_qty=returned_qty+?, return_requested_qty=0,
+       status=CASE WHEN returned_qty+?>=qty THEN 'returned' ELSE 'received' END,
+       returned_at=CASE WHEN returned_qty+?>=qty THEN ? ELSE returned_at END,
+       returned_confirmed_by=?
+     WHERE id=? AND status=? AND returned_qty=? AND ${markAll ? '1=1' : 'return_requested_qty=?'}`
+  ).bind(returnQty, returnQty, returnQty, completedAt, ctx.from.id, id, expectedStatus,
+    r.returned_qty, ...(markAll ? [] : [returnQty])).run();
+  if (!res.meta.changes) return ctx.reply(`#${id} was already updated.`, [[btn('🔄 Currently out', 'a:out')]]);
+  await env.DB.prepare('UPDATE items SET available_qty=MIN(total_qty, available_qty+?) WHERE id=?').bind(returnQty, r.item_id).run();
+  const updated = await getReq(env, id);
+  await audit(env, ctx.from.id, 'returned', 'request', id, `${r.item_name} x${returnQty}`);
+  await send(env, r.user_id, `✅ Return of #${id} (${esc(r.item_name)} ×${returnQty} ${esc(r.unit)}) confirmed. ${updated.status === 'returned' ? 'All items have been returned.' : `${updated.qty - updated.returned_qty} still outstanding.`}`);
+  return ctx.reply(`✅ Confirmed ${returnQty} returned for #${id}. ${updated.status === 'returned' ? 'All items are back in stock.' : `${updated.qty - updated.returned_qty} still outstanding.`}`, [[btn('🔄 Currently out', 'a:out')], [MENU]]);
 }
 
 async function stockList(ctx) {
@@ -411,10 +465,13 @@ async function outList(ctx) {
     `SELECT r.*, u.full_name, u.employee_id FROM requests r JOIN users u ON u.telegram_id=r.user_id JOIN items i ON i.id=r.item_id
      WHERE i.returnable=1 AND r.status IN ('received','return_pending') ORDER BY r.due_at LIMIT 15`).all();
   if (!results.length) return ctx.reply('Nothing is currently out.', [[MENU]]);
-  const rows = results.map(r => [btn(`↩️ Mark returned #${r.id}`, `a:ret:${r.id}`)]);
+  const rows = results.map(r => [btn(
+    r.status === 'return_pending' ? `✅ Confirm ${r.return_requested_qty} returned #${r.id}` : `↩️ Mark all returned #${r.id}`,
+    r.status === 'return_pending' ? `a:ret:${r.id}` : `a:retall:${r.id}`
+  )]);
   rows.push([MENU]);
   return ctx.reply('🔄 <b>Currently out</b>\n\n' + results.map(r =>
-    `#${r.id} · ${esc(r.item_name)} ×${r.qty}\n   ${esc(r.full_name)} (${esc(r.employee_id || '—')}) · due ${fmt(r.due_at, ctx.env)}${r.due_at < now() ? ' ⚠️ OVERDUE' : ''}${r.status === 'return_pending' ? ' · returning' : ''}`).join('\n\n'), rows);
+    `#${r.id} · ${esc(r.item_name)} · ${r.qty - r.returned_qty} outstanding${r.status === 'return_pending' ? ` (${r.return_requested_qty} reported returned)` : ''}\n   ${esc(r.full_name)} (${esc(r.employee_id || '—')}) · due ${fmt(r.due_at, ctx.env)}${r.due_at < now() ? ' ⚠️ OVERDUE' : ''}`).join('\n\n'), rows);
 }
 
 // ───────────────────────── admin text commands ─────────────────────────
