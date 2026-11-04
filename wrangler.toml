@@ -8,7 +8,7 @@ database_name = "item-bot-db"
 database_id = "PASTE_YOUR_D1_ID_HERE"
 
 [vars]
-ADMIN_IDS = "REPLACE_WITH_ADMIN_TELEGRAM_ID"   # comma-separated Telegram IDs
+ADMIN_IDS = "1890482340"   # comma-separated Telegram IDs
 TZ_OFFSET = "3"           # Africa/Nairobi is UTC+3
 
 [triggers]
