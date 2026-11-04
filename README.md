@@ -27,3 +27,5 @@ Open the bot in Telegram and send `/start`. Add inventory with `/additem Laptop 
 
 ## Admin commands
 /help · /additem · /restock · /removeitem · /history ID · /user ID · /req ID · /block · /unblock · /export (CSV) · /audit
+
+Admins can also open **🧾 Transactions** from the bot menu to browse paginated audit activity, including requests, decisions, receipts, returns, and stock changes.

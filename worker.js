@@ -150,6 +150,7 @@ async function menu(ctx, user) {
   if (isAdmin(ctx.env, ctx.from.id)) rows.push(
     [btn('⏳ Pending requests', 'a:pend'), btn('👥 Pending users', 'a:users')],
     [btn('📊 Stock', 'a:stock'), btn('🔄 Currently out', 'a:out')],
+    [btn('🧾 Transactions', 'a:tx:0')],
   );
   return ctx.reply(`👋 Hello <b>${esc(user.full_name)}</b>!\nWhat would you like to do?` + (isAdmin(ctx.env, ctx.from.id) ? '\n\nAdmin commands: /help' : ''), rows);
 }
@@ -297,6 +298,7 @@ async function requestReturn(ctx, id) {
 async function adminCb(ctx, p) {
   const id = Number(p[2]);
   switch (p[1]) {
+    case 'tx': return transactionActivity(ctx, Number(p[2]) || 0);
     case 'pend': return pendingList(ctx);
     case 'users': return pendingUsers(ctx);
     case 'stock': return stockList(ctx);
@@ -309,6 +311,28 @@ async function adminCb(ctx, p) {
     case 'rjs': await clearState(ctx.env, ctx.from.id); return finishReject(ctx, id, '');
     case 'ret': return confirmReturn(ctx, id);
   }
+}
+
+async function transactionActivity(ctx, page) {
+  const size = 8;
+  const { results } = await ctx.env.DB.prepare(
+    'SELECT * FROM audit_log ORDER BY id DESC LIMIT ? OFFSET ?'
+  ).bind(size + 1, page * size).all();
+  if (!results.length && page === 0) return ctx.reply('No transaction activity yet.', [[MENU]]);
+  if (!results.length) return ctx.reply('No more transaction activity.', [[btn('⬅️ Previous', `a:tx:${page - 1}`)], [MENU]]);
+
+  const entries = results.slice(0, size).map(a =>
+    `<b>#${a.id} ${esc(a.action)}</b> · ${esc(a.entity || 'activity')}${a.entity_id == null ? '' : ` #${a.entity_id}`}\n` +
+    `   ${fmt(a.ts, ctx.env)} · admin/user <code>${esc(a.actor_id ?? '—')}</code>` +
+    (a.details ? `\n   ${esc(a.details)}` : '')
+  );
+  const rows = [];
+  const nav = [];
+  if (page > 0) nav.push(btn('⬅️ Previous', `a:tx:${page - 1}`));
+  if (results.length > size) nav.push(btn('Next ➡️', `a:tx:${page + 1}`));
+  if (nav.length) rows.push(nav);
+  rows.push([MENU]);
+  return ctx.reply(`🧾 <b>Transaction activity</b>\nLatest actions, requests, stock changes, and returns:\n\n${entries.join('\n\n')}`, rows);
 }
 
 async function decideUser(ctx, uid, ok) {
